@@ -1,0 +1,6 @@
+﻿  main.cpp
+C:\Users\kd\source\repos\ThreadDread\ThreadDread\main.cpp(259,49): warning C4244: 'argument': conversion from 'SIZE_T' to 'DWORD', possible loss of data
+C:\Users\kd\source\repos\ThreadDread\ThreadDread\main.cpp(324,11): warning C4477: 'printf' : format string '%llX' requires an argument of type 'unsigned __int64', but variadic argument 2 has type 'HANDLE'
+C:\Users\kd\source\repos\ThreadDread\ThreadDread\main.cpp(467,60): warning C4477: 'snprintf' : format string '%llX' requires an argument of type 'unsigned __int64', but variadic argument 16 has type 'void *'
+C:\Users\kd\source\repos\ThreadDread\ThreadDread\main.cpp(29,10): warning C4101: 'clireceive': unreferenced local variable
+  ThreadDread.vcxproj -> C:\Users\kd\source\repos\ThreadDread\x64\Debug\ThreadDread.exe
