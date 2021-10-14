@@ -12,7 +12,7 @@ View usage information by specifying the "-h" option on the command line, like s
 
 :::::Description:::::
 
-ThreadDread is a program I designed to be able to do memory analysis and deep process injection analysis workflows on a running system. It can be used as both a live response and hunting tool. As a live response tool, the incident responder may wich to perform the following actions:
+ThreadDread is a program I designed to be able to do memory analysis and deep process injection analysis workflows on a running system. It can be used as both a live response and hunting tool. As a live response tool, the incident responder may wish to perform the following actions:
 
 1. List running processes on the system
 2. List running threads on the system (or from a specific process)
