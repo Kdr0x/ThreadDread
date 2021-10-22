@@ -37,16 +37,6 @@ int main(int argc, char** argv)
 	// Find the function "NtQueryInformationThread"
 	PNQIT pNQIT = (PNQIT)GetProcAddress(ntdll, "NtQueryInformationThread");
 
-	/*
-	modarg.pid = 2008;
-	modarg.modListMode = true;
-	modarg.networkMode = true;
-	modarg.reportServerAddress = (char*)"127.0.0.1";
-	modarg.reportServerPort = (char*)"8080";
-	modarg.pid = 2008;
-	modarg.Mode = true;
-	*/
-
 	if (modarg.networkMode)
 	{
 		clisend.setInitStatus(&winsockInit);
@@ -142,13 +132,6 @@ int main(int argc, char** argv)
 			// Allocate memory for the executable path of the process
 			gcp.allocateProcessName();
 			gcp.resolveExePath();
-
-			if (strstr(gcp.getProcessName(), "SearchApp") != 0 || strstr(gcp.getProcessName(),"powershell") != 0 || strstr(gcp.getProcessName(), "Visual Studio") != 0 || strstr(gcp.getProcessName(), "OneDrive") != 0)
-			{
-				gcp.freeProcessName();
-				gcp.closeProcessHandle();
-				continue;
-			}
 
 			// Tell the user what we are about to do
 			//printf("\n[*] Initiating binary inject scan of process %u (%s)\n", gcp.getProcessID(), gcp.getProcessName());
