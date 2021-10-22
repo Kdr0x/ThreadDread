@@ -2,7 +2,7 @@
 
 Author: Gary "kd" Contreras
 
-Latest: 2021-10-14
+Latest: 2021-10-21
 
 Version: Beta 1.2
 
