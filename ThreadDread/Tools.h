@@ -17,6 +17,9 @@ void printHelp();
 // Print the legend
 void printLegend();
 
+// Process self-termination
+void terminateSelf(LPVOID);		// Default self-kill timer of 15 minutes
+
 class CLISOCK
 {
 	bool initialized;
@@ -254,6 +257,7 @@ struct SCANDATA
 
 class GCYARA
 {
+	char source;
 	YR_COMPILER* yc;
 	GCMEMORY* memory;
 	YR_RULES* yrs;
@@ -269,6 +273,7 @@ public:
 	bool addRule(char* r);
 	bool finalizeRules();
 	bool finalize();
+	void setSource(char);
 	DWORD getError() { return yError; }
 };
 

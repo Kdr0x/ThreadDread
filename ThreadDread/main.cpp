@@ -2,22 +2,22 @@
 
 // Global variables
 bool winsockInit;
-char* yaraRules[5] =
-{
-	(char*)"rule PEFileHeader\n{\n\tstrings:\n\t\t$mz = \"MZ\" nocase\n\t\t$pe = { 50 45 00 00 }\n\t\t$dosstr = \"This program cannot be run in DOS mode\" nocase\n\n\tcondition:\n\t\t$mz at 400 or $pe at 512 or $dosstr at 1024\n}",
-	(char*)"rule CSMeterpreter\n{\n\tstrings:\n\t\t$metcs = \"MZARUH\"\n\n\tcondition:\n\t\t$metcs at 0\n}",
-	0,
-	0,
-	0
-};
 
 // All the magic happens here
 int main(int argc, char** argv)
 {
+	// Start a new thread on the "safety" self-kill timer
+	DWORD safetyThreadID = 0;
+	HANDLE safetyThread = 0;
+
 	// Parse the program arguments
 	MODESARGS modarg;
 	zeroMemory(&modarg, sizeof(MODESARGS));
 	parseArguments(argc, argv, &modarg);
+
+	// Create the safety kill thread
+	if (modarg.timer <= 0) modarg.timer = 15;
+	safetyThread = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)terminateSelf, (LPVOID)&(modarg.timer), 0, &safetyThreadID);
 
 	GCMEMORY gcm;							// This object handles local and remote process memory
 	GCPROCESS gcp;							// This object handles processes
@@ -44,7 +44,7 @@ int main(int argc, char** argv)
 	modarg.reportServerAddress = (char*)"127.0.0.1";
 	modarg.reportServerPort = (char*)"8080";
 	modarg.pid = 2008;
-	modarg.threadListMode = true;
+	modarg.Mode = true;
 	*/
 
 	if (modarg.networkMode)
@@ -66,20 +66,23 @@ int main(int argc, char** argv)
 	if (modarg.threadResumeMode)
 	{
 		gct.setThreadID(modarg.tid);
-		gct.resumeThread();
+		if (gct.resumeThread()) printf("[*] Successfully resumed thread %u\n", modarg.tid);
+		else printf("[!] Error: Could not resume thread %u\n", modarg.tid);
 		ExitProcess(0);
 	}
 	if (modarg.threadSuspendMode)
 	{
 		gct.setThreadID(modarg.tid);
-		gct.suspendThread();
+		if (gct.suspendThread()) printf("[*] Successfully suspended thread %u\n", modarg.tid);
+		else printf("[!] Error: Could not suspend thread %u\n", modarg.tid);
 		ExitProcess(0);
 	}
 
 	if (modarg.threadKillMode)
 	{
 		gct.setThreadID(modarg.tid);
-		gct.killThread();
+		if (gct.killThread()) printf("[*] Successfully killed thread %u\n", modarg.tid);
+		else printf("[!] Error: Could not kill thread %u\n", modarg.tid);
 		ExitProcess(0);
 	}
 
@@ -314,6 +317,8 @@ int main(int argc, char** argv)
 	// Check for yaraMode being enabled
 	if (modarg.yaraMode)
 	{
+		bool ruleTest = false;
+
 		// Determine whether a process is being targeted or not
 		bool targetedScan = false;
 		if (modarg.pid != 0) targetedScan = true;
@@ -328,7 +333,13 @@ int main(int argc, char** argv)
 		// Initialize Yara
 		gcy.initialize();
 		gcy.allocRules();
-		for (unsigned char i = 0; i < 2; i++) gcy.addRule(yaraRules[i]);
+		if (modarg.yaraSourceMode) gcy.setSource(1);
+		ruleTest = gcy.addRule(modarg.yaraSource);
+		if (!ruleTest)
+		{
+			printf("[!] Error: Yara rules failed to compile; exiting!\n");
+			ExitProcess(0);
+		}
 		gcy.finalizeRules();
 		
 		// Snapshot all processes on the system
@@ -377,7 +388,7 @@ int main(int argc, char** argv)
 				mi = gcm.getMemoryInfo();
 
 				// Skip the region if we encounter a guard page (this causes problems)
-				if ((mi->Protect & PAGE_GUARD) != 0) goto skipRegion2;
+				//if ((mi->Protect & PAGE_GUARD) != 0) goto skipRegion2;
 
 				// Get committed pages only
 				if (mi->State == MEM_COMMIT)
@@ -385,7 +396,11 @@ int main(int argc, char** argv)
 					// Allocate memory to copy the remote buffer and then copy it
 					gcm.allocateLocal(mi->RegionSize);
 					gcm.setRemoteBufferSize(mi->RegionSize);
-					gcm.remoteCopy(gcp.getProcessHandle());					// ERROR FIX THIS, remote copy failed
+					// Set the remote region to RWX, copy it, then set it back the way it was
+					gcm.setNewProtect(PAGE_EXECUTE_READWRITE);
+					VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getNewProtect()), gcm.getOldProtect());
+					gcm.remoteCopy(gcp.getProcessHandle());
+					VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getOldProtect()), gcm.getNewProtect());
 					gco.allocateBuffer();
 					gco.resolveHostNames();
 
@@ -434,6 +449,126 @@ int main(int argc, char** argv)
 
 		gcy.finalize();
 		ExitProcess(0);
+	}
+
+	if (modarg.dumpMode && modarg.pid != 0)
+	{
+		// Create some file handles
+		HANDLE dfHandle = 0;
+		HANDLE mfHandle = 0;
+
+		// MBI Pointer, memory pointer, error flag, and dump file bytes written
+		MEMORY_BASIC_INFORMATION* mi = 0;
+		char* memptr = 0;
+		DWORD dfBW = 0;
+		bool errorFlag = false;
+
+		// Create some space to hold the file names for the dump file and map file
+		char* procDumpFile = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 32);
+		char* procMapFile = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 32);
+		char* mapString = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 80);
+		if (procDumpFile == 0 || procMapFile == 0 || mapString == 0)
+		{
+			errorFlag = true;
+			goto errorDumpProcess;
+		}
+
+		// Set the dump file and map file names
+		snprintf(procDumpFile, 32, "%u_dump.bin", modarg.pid);
+		snprintf(procMapFile, 32, "%u_map.txt", modarg.pid);
+
+		// Create some file handles; one for the process dump and one for the mapping information
+		dfHandle = CreateFileA(procDumpFile, GENERIC_ALL, 1 | 2 | 4, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+		mfHandle = CreateFileA(procMapFile, GENERIC_ALL, 1 | 2 | 4, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+		if (dfHandle == INVALID_HANDLE_VALUE || mfHandle == INVALID_HANDLE_VALUE)
+		{
+			errorFlag = true;
+			goto errorDumpProcess;
+		}
+
+		// Try to open a process handle to start dumping process memory
+		gcp.setProcessID(modarg.pid);
+		gcp.setProcessHandle(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, gcp.getProcessID()));
+		if (gcp.getProcessHandle() == NULL)
+		{
+			errorFlag = true;
+			goto errorDumpProcess;
+		}
+
+		// Print the process that is currently being dumped
+		printf("[*] Dumping process %u...\n", modarg.pid);
+
+		// Run through the process memory space and dump each mapped region to the dump file
+		// Record each dumped memory region's base address, size, type, current protection, and dump file offset into the map file
+		while ((void*)memptr <= ntdll)
+		{
+			// Clean out the memory basic information structure
+			gcm.zeroMBI();
+
+			// Query the memory region of the target process
+			gcm.setRemoteAddress(memptr);
+			gcm.remoteQuery(gcp.getProcessHandle());
+			mi = gcm.getMemoryInfo();
+
+			// Zero the map string
+			zeroMemory(mapString, 80);
+
+			// Get committed pages only
+			if (mi->State == MEM_COMMIT)
+			{
+				// Bytes Written
+				DWORD bw = 0;
+
+				// Allocate memory to copy the remote buffer and then copy it
+				gcm.allocateLocal(mi->RegionSize);
+				gcm.setRemoteBufferSize(mi->RegionSize);
+
+				// Set the remote region to RWX, copy it, then set it back the way it was
+				gcm.setNewProtect(PAGE_EXECUTE_READWRITE);
+				VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getNewProtect()), gcm.getOldProtect());
+				gcm.remoteCopy(gcp.getProcessHandle());
+				VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getOldProtect()), gcm.getNewProtect());
+				gco.allocateBuffer();
+				gco.resolveHostNames();
+
+				// Write the region to the dump file; muahahahahaha
+				WriteFile(dfHandle, gcm.getLocalAddress(), gcm.getLocalSize(), &bw, 0);
+				dfBW += bw;
+
+				// Get the attributes into a string and write them to the map file
+				snprintf(mapString, 80, "%p,0x%X,0x%X,0x%X,0x%X\n", mi->BaseAddress, mi->RegionSize, mi->Protect, mi->Type, (dfBW - mi->RegionSize));
+				bw = 0;
+				WriteFile(mfHandle, mapString, (DWORD)strlen(mapString), &bw, 0);
+
+				// Get ready for the next iteration
+				gcm.freeLocal();
+				gcm.setRemoteBufferSize(0);
+			}
+			
+			// Increate the memory pointer for the next iteration
+			if (mi->RegionSize == 0) memptr += 4096;
+			else memptr += mi->RegionSize;
+		}
+
+		// Print how many bytes were dumped from the process
+		printf("[*] Successfully dumped %u (0x%X) bytes from process %u to file %s\n", dfBW, dfBW, modarg.pid, procDumpFile);
+		printf("[*] Check file %s for memory mappings\n", procMapFile);
+
+		// Clean up after dumping the process, releasing handles and freeing heap memory
+		gcp.closeProcessHandle();
+		CloseHandle(dfHandle);
+		CloseHandle(mfHandle);
+		HeapFree(GetProcessHeap(), 0, mapString);
+		HeapFree(GetProcessHeap(), 0, procDumpFile);
+		HeapFree(GetProcessHeap(), 0, procMapFile);
+
+	errorDumpProcess:
+		if (errorFlag)
+		{
+			printf("[!] Error: Could not dump process, likely due to invalid process handle, insufficient heap space, or inability to open a file for writing; exiting!\n");
+			ExitProcess(1);
+		}
+		else ExitProcess(0);
 	}
 
 	if (modarg.zeroMode)

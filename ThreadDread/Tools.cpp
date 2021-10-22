@@ -638,6 +638,7 @@ GCYARA::GCYARA()
 bool GCYARA::initialize()
 {
 	numRules = 0;
+	source = 0;
 
 	int yResult = yr_initialize();
 	if (yResult != ERROR_SUCCESS)
@@ -661,14 +662,32 @@ bool GCYARA::initialize()
 bool GCYARA::addRule(char* r)
 {
 	int yResult = 0;
-	yResult = yr_compiler_add_string(yc, r, 0);
-	if (yResult != ERROR_SUCCESS)
-	{
-		yError = 4;
-		return false;
-	}
+	FILE* fptr = 0;
 
-	numRules++;
+	switch (source)
+	{
+	case 1:
+		fptr = fopen(r, "r");
+		if (fptr == 0)
+		{
+			yResult = -1;
+			return false;
+		}
+		yResult = yr_compiler_add_file(yc, fptr, 0, 0);
+		fclose(fptr);
+		if (yResult == ERROR_SUCCESS) return true;
+		else return false;
+	case 2:
+		return false;
+	default:
+		yResult = yr_compiler_add_string(yc, r, 0);
+		if (yResult != ERROR_SUCCESS)
+		{
+			yError = 4;
+			return false;
+		}
+		return true;
+	}
 }
 
 bool GCYARA::allocRules()
@@ -710,6 +729,8 @@ bool GCYARA::finalize()
 	if (yResult == ERROR_SUCCESS) return true;
 	else return false;
 }
+
+void GCYARA::setSource(char s) { source = s; }
 
 DWORD CLISOCK::nsinit()
 {
@@ -859,8 +880,10 @@ void parseArguments(int argc, char** argv, MODESARGS* settings)
 	settings->modHuntMode = false;
 	settings->procListMode = false;
 	settings->threadListMode = false;
+	settings->yaraSourceMode = false;
 	settings->dumpAddress = 0;
 	settings->pidstr = 0;
+	settings->yaraSource = 0;
 	settings->queryAddress = 0;
 	settings->regionSize = 0;
 	settings->reportServerAddress = 0;
@@ -941,9 +964,17 @@ void parseArguments(int argc, char** argv, MODESARGS* settings)
 					}
 
 					// Look for the argument to enable yara scanning
-					if (argv[i][j] == 'y') {
+					if (argv[i][j] == 'T') {
+						offsetCounter++;
+						settings->timer = (DWORD)atoi(argv[i + offsetCounter]);
+					}
+
+					// Look for the argument to enable yara source
+					if (argv[i][j] == 'Y') {
 						offsetCounter++;
 						settings->yaraMode = true;
+						settings->yaraSourceMode = true;
+						settings->yaraSource = argv[i + offsetCounter];
 					}
 
 					// Look for the argument to specify a Process ID
@@ -1027,14 +1058,13 @@ void printHelp()
 	printf("\t-A <address> Allows you to specify the collection server IP/Hostname for output\n");
 	printf("\t-P <port> Allows you to specify the collection server port for output (required with -A)\n\n");
 
-	// Module listing
+	// Safety kill
+	printf("\t-T <minutes> Allows you to specify a safety timer on the process (in minutes) before it self-terminates\n\n");
+
+	// Thread/Process/Module listing
+	printf("\t-l Enables thread listing mode; specify a process with -p (optional)\n");
+	printf("\t-L Enables process listing mode\n");
 	printf("\t-m Enables module listing mode; specify a process with -p (required)\n\n");
-
-	// Thread listing
-	printf("\t-l Enables thread listing mode; specify a process with -p (optional)\n\n");
-
-	// Process listing
-	printf("\t-L Enables process listing mode\n\n");
 
 	// Thread suspend/resume/kill
 	printf("\t-r <TID> Resumes a specific Thread ID\n");
@@ -1042,12 +1072,34 @@ void printHelp()
 	printf("\t-k <TID> Kills a specific Thread ID\n\n");
 
 	// Memory manipulation
-	printf("\t-d Enables automatic \"dump\" mode when querying memory addresses/regions\n");
+	printf("\t-q <address> Queries a specific memory address inside a remote process; must specify Process ID with -p\n");
+	printf("\t-d Enables \"dump\" mode when querying memory addresses or allows you to dump a complete process\n");
 	printf("\t-p <PID> Targets a specific process for an operation such as querying or Yara scanning memory addresses/regions\n");
-	printf("\t-y Enables Yara scanning with built-in rules\n");
-	//printf("\t-z Enables \"zero\"/\"clean\" mode which will write 0x00 bytes to a memory region and deallocate it\n\n");
+	printf("\t-Y <RuleFilePath> Enables Yara scanning using a specific Yara rules file path\n");
+	printf("\t-B Enables binary injection detection to discover injected PE files\n\n");
 
 	// Enable verbosity
 	printf("\t-v Enables printing the legend of memory constants for increased \"verbosity\" (it helps!)\n\n");
 	printf("\tWithout any arguments, this program attempts to find interesting threads!\n");
+}
+
+void terminateSelf(LPVOID m)
+{
+	/*
+		This function serves an important purpose; it is meant to run inside a separate thread as a "safety" self-kill timer
+		This way, the process does not run longer than it should on any given system; default is 15 minutes
+	*/
+	DWORD oneMinute = 1000 * 60;
+
+	// Just in case the memory address that is passed in holds a value of 0, we will set it to a "safe" limit
+	if (*(DWORD*)m == 0) *(DWORD*)m = 15;
+
+	// Sleep for one minute * the number of minutes requested
+	Sleep(oneMinute * (*(DWORD*)m));
+
+	// Before exiting the process, tell the user that the "safety" time limit has been reached
+	printf("[*] Safety kill timer of %u minute(s) has been reached! Exiting process...\n", *(DWORD*)m);
+
+	// Exit the process
+	ExitProcess(100);
 }

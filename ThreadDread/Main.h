@@ -23,11 +23,13 @@ struct MODESARGS
 	char* queryAddress;
 	char* zeroAddress;
 	char* regionSize;
+	char* yaraSource;
 
 	// Mode switches
 	bool targetListMode;
 	bool fullListMode;
 	bool yaraMode;
+	bool yaraSourceMode;
 	bool dumpMode;
 	bool modListMode;
 	bool modHuntMode;
@@ -45,6 +47,7 @@ struct MODESARGS
 	// Hold a Process ID and Thread ID
 	DWORD pid;
 	DWORD tid;
+	DWORD timer;
 };
 
 
