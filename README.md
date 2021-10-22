@@ -4,7 +4,7 @@ Author: Gary "kd" Contreras
 
 Latest: 2021-10-14
 
-Version: 1.0
+Version: Beta 1.2
 
 :::::Usage:::::
 
