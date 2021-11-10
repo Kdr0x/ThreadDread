@@ -10,6 +10,8 @@ Version: Beta 1.4
 
 View usage information by specifying the "-h" option on the command line, like so: "ThreadDread.exe -h".
 
+See "ThreadDread.docx" for more extensive documentation.
+
 Important note: The tool requires admin rights to run properly! It is meant to inspect all running processes on the system, including elevated ones.
 
 :::::Description:::::
