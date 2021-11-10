@@ -286,18 +286,22 @@ bool GCSNAPS::logProcesses(GCOUTPUT * o, void* P)
 	return true;
 }
 
-bool GCSNAPS::logThreads(GCOUTPUT * o, void * M, void* T, void* P)
+bool GCSNAPS::logThreads(GCOUTPUT * o, void * M, void* T, void* P, void * S)
 {
 	zeroMemory(&te, sizeof(THREADENTRY32));
 	te.dwSize = sizeof(THREADENTRY32);
 
+	char* mn = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 128);
+
 	HMODULE nt = LoadLibraryA("ntdll.dll");
 	void* sa = 0;
+	void* tsa = 0;
 	MEMORY_BASIC_INFORMATION* i = 0;
 
 	GCMEMORY* m = (GCMEMORY*)M;
 	GCTHREAD* t = (GCTHREAD*)T;
 	GCPROCESS* p = (GCPROCESS*)P;
+	GCSNAPS* s = (GCSNAPS*)S;
 
 	DWORD nlen = 20;
 	char cn[20];
@@ -316,25 +320,62 @@ bool GCSNAPS::logThreads(GCOUTPUT * o, void * M, void* T, void* P)
 			t->setThreadID(te.th32ThreadID);
 			t->setThreadHandle(OpenThread(THREAD_QUERY_INFORMATION, FALSE, t->getThreadID()));
 			sa = t->resolveThreadStartAddress(nt);
+			t->resolveThreadTimes();
 			t->closeThreadHandle();
 		}
-		if (p != 0 && m != 0)
+		if (p != 0 && m != 0 && s != 0)
 		{
 			p->setProcessID(te.th32OwnerProcessID);
 			p->setProcessHandle(OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, p->getProcessID()));
+			p->resolveProcessTimes();
 			m->setRemoteAddress((char*)sa);
 			m->remoteQuery(p->getProcessHandle());
 			p->closeProcessHandle();
 			i = m->getMemoryInfo();
+			tsa = i->AllocationBase;
+
+			strcpy(mn, "blank");
+
+			s->takeModuleSnapshot(p->getProcessID());
+			s->findModuleEntry();
+
+			do
+			{
+				// Get the next module entry
+				MODULEENTRY32* modEntry = s->getModuleEntry();
+
+				// Get the module name, overwrite the mn (module name) buffer, and break if the target allocation was found
+				if (modEntry->modBaseAddr == tsa)
+				{
+					strcpy_s(mn, 128, modEntry->szModule);
+					break;
+				}
+
+				// Loop until no more modules are found
+			} while (s->findModuleEntry());
+
 		}
-		_snprintf(outmsg, 1024, "ThreadList %s,%u,%u,%p,%p,0x%llX,0x%X\n", cn, te.th32ThreadID, te.th32OwnerProcessID, sa, i->BaseAddress, i->RegionSize, i->Protect);
+		_snprintf(outmsg, 1024, "ThreadList %s,%u,%hu-%02hu-%02hu %02hu:%02hu:%02hu Z,%u,%hu-%02hu-%02hu %02hu:%02hu:%02hu Z,%p,%p,0x%llX,0x%X,%s\n", cn,
+			te.th32ThreadID, t->getThreadStartTime()->wYear, t->getThreadStartTime()->wMonth, t->getThreadStartTime()->wDay,
+			t->getThreadStartTime()->wHour, t->getThreadStartTime()->wMinute, t->getThreadStartTime()->wSecond,
+			te.th32OwnerProcessID, p->getProcessStartTime()->wYear, p->getProcessStartTime()->wMonth, p->getProcessStartTime()->wDay,
+			p->getProcessStartTime()->wHour, p->getProcessStartTime()->wMinute, p->getProcessStartTime()->wSecond,
+			sa, i->BaseAddress, i->RegionSize, i->Protect, mn);
 
 		if (pid != 0 && (pid == te.th32OwnerProcessID)) o->logOutput((char*)outmsg, 1024);
 		if (pid == 0 && te.th32OwnerProcessID != 0 && te.th32OwnerProcessID != 4) o->logOutput((char*)outmsg, 1024);
 		zeroMemory(outmsg, 1024);
 		zeroMemory(&te, sizeof(THREADENTRY32));
 		te.dwSize = sizeof(THREADENTRY32);
+		p->clearTimes();
+		t->clearTimes();
+		s->releaseModuleHandle();
+		tsa = 0;
+		zeroMemory(mn, 128);
 	} while (Thread32Next(threadSnapshot, &te) != 0);
+
+	HeapFree(GetProcessHeap(), 0, mn);
+	
 	return true;
 }
 
@@ -837,13 +878,13 @@ int yara_scan_cb(int message, void* message_data, void* user_data)
 	case CALLBACK_MSG_RULE_MATCHING:
 		if (ud->netmode)
 		{
-			snprintf((char*)(ud->output->getBuffer()), ud->output->getBufferSize(), "YaraScan %s,%s,%u,%p,%s\n", ud->output->getHostNameA(), md->identifier, ud->process->getProcessID(), ud->memory->getRemoteAddress(), ud->process->getProcessName());
+			snprintf((char*)(ud->output->getBuffer()), ud->output->getBufferSize(), "YaraScan %s,%s,%u,%p,%s,0x%X\n", ud->output->getHostNameA(), md->identifier, ud->process->getProcessID(), ud->memory->getRemoteAddress(), ud->process->getProcessName(),ud->memory->getMemoryInfo()->Protect);
 			ud->output->logOutput((char*)(ud->output->getBuffer()), strlen((char*)(ud->output->getBuffer())));
 		}
 		else
 		{
-			snprintf((char*)(ud->output->getBuffer()), ud->output->getBufferSize(), "[*] Yara rule \"%s\" matched on region %p inside PID %u (%s)\n",
-				md->identifier, ud->memory->getRemoteAddress(), ud->process->getProcessID(), ud->process->getProcessName());
+			snprintf((char*)(ud->output->getBuffer()), ud->output->getBufferSize(), "[*] Yara rule \"%s\" matched on region %p inside PID %u (%s) with protection 0x%X\n",
+				md->identifier, ud->memory->getRemoteAddress(), ud->process->getProcessID(), ud->process->getProcessName(),ud->memory->getMemoryInfo()->Protect);
 			ud->output->logOutput((char*)(ud->output->getBuffer()), ud->output->getBufferSize());
 		}
 		iResult = CALLBACK_CONTINUE;
@@ -864,33 +905,32 @@ int yara_scan_cb(int message, void* message_data, void* user_data)
 
 void parseArguments(int argc, char** argv, MODESARGS* settings)
 {
-	settings->dumpMode = false;
-	settings->fullListMode = false;
-	settings->legendMode = false;
-	settings->networkMode = false;
-	settings->queryMode = false;
-	settings->targetListMode = false;
-	settings->yaraMode = false;
-	settings->zeroMode = false;
-	settings->helpMode = false;
-	settings->threadResumeMode = false;
-	settings->threadSuspendMode = false;
-	settings->threadKillMode = false;
-	settings->modListMode = false;
-	settings->modHuntMode = false;
-	settings->procListMode = false;
-	settings->threadListMode = false;
-	settings->yaraSourceMode = false;
-	settings->dumpAddress = 0;
-	settings->pidstr = 0;
-	settings->yaraSource = 0;
-	settings->queryAddress = 0;
-	settings->regionSize = 0;
-	settings->reportServerAddress = 0;
-	settings->reportServerPort = 0;
-	settings->tidstr = 0;
-	settings->zeroAddress = 0;
-	settings->pid = 0;
+	settings->dumpMode = false;						// Used
+	settings->fullListMode = false;					// Used
+	settings->legendMode = false;					// Used
+	settings->networkMode = false;					// Used
+	settings->queryMode = false;					// Used
+	settings->targetListMode = false;				// ???
+	settings->yaraMode = false;						// Used
+	settings->zeroMode = false;						// ???
+	settings->helpMode = false;						// Used
+	settings->threadResumeMode = false;				// Used
+	settings->threadSuspendMode = false;			// Used
+	settings->threadKillMode = false;				// Used
+	settings->modListMode = false;					// Used
+	settings->modHuntMode = false;					// Used
+	settings->procListMode = false;					// Used
+	settings->threadListMode = false;				// Used
+	settings->yaraSourceMode = false;				// Used
+	settings->dumpAddress = 0;						// Not used
+	settings->pidstr = 0;							// Meh
+	settings->yaraSource = 0;						// Used
+	settings->queryAddress = 0;						// Used
+	settings->reportServerAddress = 0;				// Used
+	settings->reportServerPort = 0;					// Used
+	settings->tidstr = 0;							// Meh
+	settings->zeroAddress = 0;						// ???
+	settings->pid = 0;								// Used
 
 	// Look for more than one argument to process
 	if (argc > 1)
@@ -910,7 +950,7 @@ void parseArguments(int argc, char** argv, MODESARGS* settings)
 					// Look for the help argument and print the proper usage information
 					if (argv[i][j] == 'h')
 					{
-						offsetCounter++;
+						//offsetCounter++;
 						settings->helpMode = true;
 					}
 
@@ -940,19 +980,19 @@ void parseArguments(int argc, char** argv, MODESARGS* settings)
 
 					// Look for the argument to list threads
 					if (argv[i][j] == 'l') {
-						offsetCounter++;
+						//offsetCounter++;
 						settings->threadListMode = true;
 					}
 
 					// Look for the argument to list processes
 					if (argv[i][j] == 'L') {
-						offsetCounter++;
+						//offsetCounter++;
 						settings->procListMode = true;
 					}
 
 					// Look for the argument to hunt injected modules
 					if (argv[i][j] == 'B') {
-						offsetCounter++;
+						//offsetCounter++;
 						settings->modHuntMode = true;
 					}
 
@@ -986,21 +1026,21 @@ void parseArguments(int argc, char** argv, MODESARGS* settings)
 
 					// Look for the argument to dump memory starting at a specific virtual address
 					if (argv[i][j] == 'd') {
-						offsetCounter++;
+						//offsetCounter++;
 						settings->dumpMode = true;
-						settings->dumpAddress = argv[i + offsetCounter];
+						//settings->dumpAddress = argv[i + offsetCounter];
 					}
 
 					// Look for the argument to destroy a memory region starting at a specific virtual address
 					if (argv[i][j] == 'z') {
-						offsetCounter++;
-						settings->zeroMode = true;
-						settings->zeroAddress = argv[i + offsetCounter];
+						//offsetCounter++;
+						//settings->zeroMode = true;
+						//settings->zeroAddress = argv[i + offsetCounter];
 					}
 
 					// Look for the verbose argument to print the legend, where necessary
 					if (argv[i][j] == 'v') {
-						offsetCounter++;
+						//offsetCounter++;
 						settings->legendMode = true;
 					}
 
@@ -1020,8 +1060,8 @@ void parseArguments(int argc, char** argv, MODESARGS* settings)
 
 					// Look for the module listing argument, where necessary
 					if (argv[i][j] == 'm') {
-						offsetCounter++;
-						settings->modListMode = argv[i + offsetCounter];
+						//offsetCounter++;
+						settings->modListMode = true;
 					}
 
 					// Increment the counter to look for switches
@@ -1038,9 +1078,9 @@ void printLegend()
 {
 	// Print the legend
 	printf("\n==== MEMORY ALLOCATION TYPE LEGEND ====\n\n");
-	printf("MEM_IMAGE - 0x1000000 (MIGHT BE NORMAL)\nMEM_PRIVATE - 0x20000 (VERY SUSPICIOUS)\nMEM_MAPPED - 0x40000 (ABNORMAL FOR THREADS)\n\n");
+	printf("MEM_IMAGE - 0x1000000 (MIGHT BE NORMAL)\nMEM_PRIVATE - 0x20000\nMEM_MAPPED - 0x40000\n\n");
 	printf("==== MEMORY PROTECTION LEGEND ====\n\n");
-	printf("PAGE_NOACCESS - 0x1\nPAGE_READONLY - 0x2\nPAGE_READWRITE - 0x4 (VERY SUSPICIOUS)\nPAGE_WRITECOPY - 0x8\nPAGE_EXECUTE - 0x10\nPAGE_EXECUTE_READ - 0x20 (SUSPICIOUS)\nPAGE_EXECUTE_READWRITE - 0x40\t(VERY SUSPICIOUS)\nPAGE_EXECUTE_WRITECOPY - 0x80\t(NORMAL)\n\n");
+	printf("PAGE_NOACCESS - 0x1\nPAGE_READONLY - 0x2\nPAGE_READWRITE - 0x4\nPAGE_WRITECOPY - 0x8\nPAGE_EXECUTE - 0x10\nPAGE_EXECUTE_READ - 0x20\nPAGE_EXECUTE_READWRITE - 0x40\t(VERY SUSPICIOUS)\nPAGE_EXECUTE_WRITECOPY - 0x80\t(GENERALLY NORMAL)\n\n");
 	printf("==== MEMORY STATE LEGEND ====\n\n");
 	printf("MEM_COMMIT - 0x1000\tMemory region is \"committed\" and therefore usable\nMEM_RESERVE - 0x2000\tMemory region is \"reserved\" but not usable\nMEM_FREE - 0x10000\tMemory region has been \"freed\" and is no longer in use\n\n");
 }

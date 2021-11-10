@@ -174,7 +174,7 @@ public:
 	GCSNAPS();															// Initialize the variables
 	bool logModules(GCOUTPUT *);										// Print the list of modules
 	bool logProcesses(GCOUTPUT *, void*);								// Print the list of processes
-	bool logThreads(GCOUTPUT*, void*, void*, void*);					// Print the list of threads
+	bool logThreads(GCOUTPUT*, void*, void*, void*, void*);				// Print the list of threads
 	bool takeProcessSnapshot();											// Snapshots all processes on the system
 	bool takeModuleSnapshot(DWORD);										// Requires a PID parameter
 	bool takeThreadSnapshot();											// Snapshots all threads on the system

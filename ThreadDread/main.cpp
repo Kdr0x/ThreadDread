@@ -90,8 +90,9 @@ int main(int argc, char** argv)
 	{
 		gcs.takeThreadSnapshot();
 		gcs.setProcessID(modarg.pid);
-		gcs.logThreads(&gco, &gcm, &gct, &gcp);
+		gcs.logThreads(&gco, &gcm, &gct, &gcp, &gcs);
 		gcs.releaseThreadHandle();
+		if (modarg.legendMode) printLegend();
 		ExitProcess(0);
 	}
 
@@ -106,6 +107,8 @@ int main(int argc, char** argv)
 
 	if (modarg.modHuntMode)
 	{
+		void* targetAlloc = 0;
+
 		gcs.takeProcessSnapshot();
 
 		PROCESSENTRY32* pe = 0;
@@ -150,35 +153,79 @@ int main(int argc, char** argv)
 				// Skip the region if we encounter a guard page (this causes problems)
 				if ((mi->Protect & PAGE_GUARD) != 0) goto skipRegion1;
 				if (mi->Protect != PAGE_EXECUTE_READWRITE && mi->Protect != PAGE_EXECUTE_READ) goto skipRegion1;
+				// Page with execute permissions was found
 				else
 				{
-					// Find committed pages that have execute permission and are not mapped to images
-					if (mi->State == MEM_COMMIT && mi->Type != MEM_IMAGE)
+					// Look for a committed RWX region whose region base and allocation base are the same
+					if ((mi->State == MEM_COMMIT) && (mi->Protect == PAGE_EXECUTE_READWRITE) && (mi->AllocationBase == mi->BaseAddress))
 					{
-						startaddr = mi->AllocationBase;														// Set the start address equal to the base of the allocation
+						// Copy the region
+						gcm.setRemoteAddress((char*)mi->AllocationBase);
+						gcm.allocateLocal(mi->RegionSize);
+						gcm.remoteCopy(gcp.getProcessHandle());
+
+						// Overlay the DOS and NT headers on top of this memory region to check for signs of PE signatures
+						PIMAGE_DOS_HEADER pDH = (PIMAGE_DOS_HEADER)gcm.getLocalAddress();
+						PIMAGE_NT_HEADERS64 pNH = (PIMAGE_NT_HEADERS64)(gcm.getLocalAddress() + pDH->e_lfanew);
+						PIMAGE_FILE_HEADER pFH = (PIMAGE_FILE_HEADER)&(pNH->FileHeader);
+						PIMAGE_OPTIONAL_HEADER64 pOH = (PIMAGE_OPTIONAL_HEADER64)&(pNH->OptionalHeader);
+
+						// Check to make sure pNH is still pointing within the region
+						if (((SIZE_T)pNH - (SIZE_T)pDH) <= mi->RegionSize)
+						{
+							/* Inspect the potential PE's headers for evidence that it IS indeed a PE file; look for the following
+							1. "MZ" signature
+							2. PE" signature
+							3. Target machine architecture constant
+							4. Section alignment is 0x1000 (4096)
+							5. The "magic" number of a PE32+ binary
+							*/
+							if (pDH->e_magic == (WORD)0x5a4d || pNH->Signature == (DWORD)0x00004550 || pFH->Machine == IMAGE_FILE_MACHINE_AMD64 ||
+								pOH->SectionAlignment == 0x1000 || pOH->Magic == 0x20b)
+							{
+								// Start preparing buffers for output
+								gco.allocateBuffer();
+								gco.resolveHostNames();
+
+								// Log the injected PE file that was found
+								snprintf((char*)gco.getBuffer(), gco.getBufferSize(), "PEScan %s,%u,%p,0x%zX,0x%X,0x%X\n", gco.getHostNameA(), gcp.getProcessID(), mi->AllocationBase, mi->RegionSize, mi->AllocationProtect, mi->Protect);
+								gco.logOutput((char*)gco.getBuffer(), strlen((char*)gco.getBuffer()));
+
+								// Clear the buffers that were used
+								gco.clear();
+							}
+						}
+						
+						gcm.freeLocal();
+					}
+					/*/ Find committed pages that have execute permission and are not mapped to images
+					if (mi->State == MEM_COMMIT && mi->Type != MEM_IMAGE && mi->AllocationProtect != PAGE_EXECUTE_WRITECOPY)
+					{
+						// Set the initial allocation base if it was not already set
+						if (targetAlloc == 0) targetAlloc = mi->AllocationBase;
+
+						startaddr = targetAlloc;															// Set the start address equal to the base of the target allocation
 						gcm.setRemoteAddress((char*)startaddr);												// Set the remote address to query to the allocation base; where we start scanning
 						copyMemory(&mbiCopy, gcm.getMemoryInfo(), sizeof(MEMORY_BASIC_INFORMATION));		// Copy the current MBI so we don't lose it
 
-						// Run this loop as long as contiguous regions are committed to make sure we get all the data
+						// Run this loop as long as contiguous regions are part of the same allocation
 						do
 						{
 							gcm.remoteQuery(gcp.getProcessHandle());										// Query the region
 							cmbi = gcm.getMemoryInfo();														// Get the MBI information
-							if (cmbi->State == MEM_COMMIT)													// Check if the region is committed
-							{
-								endaddr = (char*)(cmbi->BaseAddress) + cmbi->RegionSize;	// Set the endaddr equal to the current region address + the region size; we will scan this next!
-								allocationSize += cmbi->RegionSize;							// Increase the allocation size by the current region size
-							}
-							gcm.setRemoteAddress((char*)endaddr);							// Set the next address to query
-						} while (cmbi->State == MEM_COMMIT);								// Run while contiguous region states are still "committed"
+							if (cmbi->AllocationBase != targetAlloc) break;									// Break if a new allocation is being read
+							endaddr = (char*)(cmbi->BaseAddress) + cmbi->RegionSize;	// Set the endaddr equal to the current region address + the region size; we will scan this next!
+							allocationSize += cmbi->RegionSize;												// Increase the allocation size by the current region size
+							gcm.setRemoteAddress((char*)endaddr);											// Set the next address to query
+						} while (cmbi->AllocationBase == targetAlloc);										// Run while the contiguous regions are part of the same allocation
 
 						// Output some data
 						gco.allocateBuffer();
 						gco.resolveHostNames();
 						if (allocationSize > 0x8000)
 						{
-							snprintf((char*)(gco.getBuffer()), gco.getBufferSize(), "BinaryInject %s,%u,%p,0x%llX,%s\n",
-								gco.getHostNameA(), gcp.getProcessID(), startaddr, allocationSize, gcp.getProcessName());
+							snprintf((char*)(gco.getBuffer()), gco.getBufferSize(), "BinaryInject %s,%u,%p,0x%llX,%s,0x%X\n",
+								gco.getHostNameA(), gcp.getProcessID(), startaddr, allocationSize, gcp.getProcessName(), gcm.getMemoryInfo()->AllocationProtect);
 							gco.logOutput((char*)gco.getBuffer(), gco.getBufferSize());
 						}
 
@@ -188,7 +235,7 @@ int main(int argc, char** argv)
 						allocationSize = 0;
 						gco.clear();
 						copyMemory(gcm.getMemoryInfo(), &mbiCopy, sizeof(MEMORY_BASIC_INFORMATION));		// Restore the saved MBI now that we are done scanning
-					}
+					}*/
 				}
 
 			skipRegion1:
@@ -203,96 +250,156 @@ int main(int argc, char** argv)
 			gcp.closeProcessHandle();
 		}
 
+		if (modarg.legendMode) printLegend();
+
 		ExitProcess(0);
 	}
 
 	if (modarg.queryMode)
 	{
-		DWORD totalSize = 0;
+		// Pointer to target allocation
+		void* targetAlloc = 0;
 
+		// Total dumped bytes and total allocation size
+		SIZE_T dfBW = 0;
+		SIZE_T allocSize = 0;
+		SIZE_T commitSize = 0;
+		SIZE_T reserveSize = 0;
+
+		// Memory information pointer
 		MEMORY_BASIC_INFORMATION* mp;
 
+		// Set the process ID to query and open a handle to the process
 		gcp.setProcessID(modarg.pid);
 		gcp.setProcessHandle(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, gcp.getProcessID()));
 
 		// Tell the user what we are about to do
 		printf("[*] Querying address %p in remote process %u\n\n", modarg.queryAddress, modarg.pid);
 
-		// Query the memory region
+		// Query the memory address initially given to get the target allocation
 		gcm.setRemoteAddress(modarg.queryAddress);
 		gcm.remoteQuery(gcp.getProcessHandle());
 		mp = gcm.getMemoryInfo();
-		gcm.setRemoteBufferSize(mp->RegionSize);
-		gcm.allocateLocal(mp->RegionSize);
+		if (targetAlloc == 0) targetAlloc = mp->AllocationBase;
 
-		// Allocate memory to store the string
-		gco.allocateBuffer();
-		snprintf((char*)(gco.getBuffer()), gco.getBufferSize(), "MemQuery Address: %p,RegBase: %p,AllBase: %p,RegSize: 0x%llX,IniProt: 0x%X,CurProt: 0x%X,RegType: 0x%X,ReState: 0x%X\n",
-			modarg.queryAddress, mp->BaseAddress, mp->AllocationBase, mp->RegionSize, mp->AllocationProtect, mp->Protect, mp->Type, mp->State);
+		// Set the remote address to the target allocation base
+		gcm.setRemoteAddress((char*)targetAlloc);
 
-		// Output the results
-		if (modarg.networkMode) gco.logOutput((char*)gco.getBuffer(), gco.getBufferSize());
-		else gco.logOutput((char*)gco.getBuffer(), gco.getBufferSize());
-
-		// Print the legend
-		if (modarg.legendMode) printLegend();
-
-		if (modarg.dumpMode && modarg.pid != 0)
+		// Run this loop for each region that is a part of the same allocation
+		do
 		{
-			char fileName[48];
-			zeroMemory(fileName, 48);
+			// Query the remote region and update the mp pointer
+			gcm.zeroMBI();
+			gcm.remoteQuery(gcp.getProcessHandle());
+			mp = gcm.getMemoryInfo();
 
-			snprintf(fileName, 48, "%u_%p.dmp", gcp.getProcessID(), mp->AllocationBase);
+			// Break the loop id the region that was just queried is outside of the target allocation
+			if (mp->AllocationBase != targetAlloc) break;
 
-			// Dump the region to disk if possible
-			DWORD bytesWritten = 0;
-			HANDLE dumpFile = CreateFileA(fileName, GENERIC_ALL, 1 | 2 | 4, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
-			
-			// Start with the allocation base
-			gcm.setRemoteAddress((char*)mp->AllocationBase);
-			
-			// Start a loop to keep dumping content while contiguous regions are committed
-			do
+			// Allocate a buffer to hold the output data
+			gco.allocateBuffer();
+
+			// Update the size counters
+			allocSize += mp->RegionSize;
+			if (mp->State == MEM_COMMIT) commitSize += mp->RegionSize;
+			if (mp->State == MEM_RESERVE) reserveSize += mp->RegionSize;
+
+			// Load the buffer with relevant data
+			snprintf((char*)(gco.getBuffer()), gco.getBufferSize(), "MemQuery %p,%p,0x%zX,0x%X,0x%X,0x%X,%p,0x%X\n",
+				modarg.queryAddress, mp->BaseAddress, mp->RegionSize, mp->Protect, mp->Type, mp->State, mp->AllocationBase, mp->AllocationProtect);
+
+			// Log the output
+			gco.logOutput((char*)gco.getBuffer(), strlen((char*)gco.getBuffer()));
+
+			// Free the output buffer
+			gco.clear();
+
+			// If dump mode is enabled, the region is committed, and the process ID is not 0, dump the region and record the mapping
+			if (modarg.dumpMode && mp->State == MEM_COMMIT && modarg.pid != 0)
 			{
-				// Zero the MBI and query the remote address
-				gcm.zeroMBI();
-				gcm.remoteQuery(gcp.getProcessHandle());
-				mp = gcm.getMemoryInfo();
+				// Create a variable to store bytes written
+				SIZE_T bw = 0;
 
-				// Break out of the loop if the next region is not committed
-				if (mp->State != MEM_COMMIT) break;
+				// Create a dump file name buffer
+				char dumpFileName[48];
+				zeroMemory(dumpFileName, 48);
 
-				printf("[*] Copying region starting at base address %p with size 0x%llX\n", mp->BaseAddress, mp->RegionSize);
+				// Create a dump mapping file name buffer
+				char dumpFileMapping[48];
+				zeroMemory(dumpFileMapping, 48);
 
-				// Allocate space for the region
-				gcm.allocateLocal(mp->RegionSize);
-				gcm.setLocalBufferSize(mp->RegionSize);
-				gcm.setRemoteBufferSize(mp->RegionSize);
-				
-				// Set the remote region to RWX, copy it, then set it back the way it was
-				gcm.setNewProtect(PAGE_EXECUTE_READWRITE);
-				VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getNewProtect()), gcm.getOldProtect());
-				gcm.remoteCopy(gcp.getProcessHandle());
-				VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getOldProtect()), gcm.getNewProtect());
+				// Create a buffer to hold the map data
+				char mapData[96];
+				zeroMemory(mapData, 96);
 
-				// Write the resulting buffer to disk
-				if (dumpFile != INVALID_HANDLE_VALUE) WriteFile(dumpFile, gcm.getLocalAddress(), mp->RegionSize, &bytesWritten, 0);
-				totalSize += bytesWritten;
-				bytesWritten = 0;
+				// Write to the file name buffers
+				snprintf(dumpFileName, 48, "%u_%p.dmp", gcp.getProcessID(), mp->AllocationBase);
+				snprintf(dumpFileMapping, 48, "%u_%p.txt", gcp.getProcessID(), mp->AllocationBase);
 
-				// Update the remote query address for the next iteration
-				gcm.setRemoteAddress((char*)mp->BaseAddress + mp->RegionSize);
-				
-				// Deallocate the memory
-				gcm.freeLocal();
-			} while (mp->State == MEM_COMMIT);
+				// Open the files for appending
+				HANDLE dumpFile = CreateFileA(dumpFileName, GENERIC_ALL, 1 | 2 | 4, 0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+				HANDLE mapFile = CreateFileA(dumpFileMapping, GENERIC_ALL, 1 | 2 | 4, 0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+				if (dumpFile == INVALID_HANDLE_VALUE || mapFile == INVALID_HANDLE_VALUE)
+				{
+					zeroMemory(dumpFileName, 48);
+					zeroMemory(dumpFileMapping, 48);
+				}
+				else
+				{
+					// Set the file pointers to the end of the files and write the data to them
+					SetFilePointer(dumpFile, 0, 0, FILE_END);
+					SetFilePointer(mapFile, 0, 0, FILE_END);
 
-			// Close the handle
-			CloseHandle(dumpFile);
-			printf("\n[*] Successfully wrote %u (0x%X) bytes to file %s in the current directory!\n", totalSize, totalSize, fileName);
+					// Allocate memory to copy the remote buffer and then copy it
+					gcm.allocateLocal(mp->RegionSize);
+					gcm.setRemoteBufferSize(mp->RegionSize);
 
-			printf("\n[*] If you dumped a PE file, you may need to fix up the section alignment before you read it statically!\n");
+					// Set the remote region to RWX, copy it, then set it back the way it was
+					gcm.setNewProtect(PAGE_EXECUTE_READWRITE);
+					VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getNewProtect()), gcm.getOldProtect());
+					gcm.remoteCopy(gcp.getProcessHandle());
+					VirtualProtectEx(gcp.getProcessHandle(), gcm.getRemoteAddress(), gcm.getRemoteSize(), *(gcm.getOldProtect()), gcm.getNewProtect());
+
+					// Write the data to the dump file
+					WriteFile(dumpFile, gcm.getLocalAddress(), gcm.getLocalSize(), (LPDWORD)&bw, 0);
+
+					// Increment the dump file bytes written counter with however many bytes were just written
+					dfBW += bw;
+					bw = 0;
+
+					// Get the mapping data; address, region size, memory protection, file offset
+					snprintf(mapData, 96, "%p,0x%zX,0x%X,0x%X,0x%zX\n", mp->BaseAddress, mp->RegionSize, mp->Protect, mp->Type, (dfBW - mp->RegionSize));
+
+					// Write the contents to the map file
+					WriteFile(mapFile, mapData, (DWORD)strlen(mapData), (LPDWORD)&bw, 0);
+
+					// Close both file handles
+					CloseHandle(dumpFile);
+					CloseHandle(mapFile);
+				}
+			}
+
+			// Reset memory structure
+			gcm.freeLocal();
+			gcm.setRemoteAddress((char*)(mp->BaseAddress) + mp->RegionSize);
+			gcm.setLocalBufferSize(0);
+			gcm.setRemoteBufferSize(0);
+
+		} while (mp->AllocationBase == targetAlloc);
+
+		gcp.closeProcessHandle();
+
+		printf("\n[*] Total allocation size: %zu (0x%zX) bytes\n", allocSize, allocSize);
+		printf("[*] Total size of all reserved regions: %zu (0x%zX) bytes\n", reserveSize, reserveSize);
+		printf("[*] Total size of all committed regions: %zu (0x%zX) bytes\n", commitSize, commitSize);
+
+		if (modarg.dumpMode)
+		{
+			printf("\n[*] Successfully wrote %zu (0x%zX) bytes to file %u_%p.dmp\n", dfBW, dfBW, modarg.pid, targetAlloc);
+			printf("[*] Check file %u_%p.txt for memory mappings!\n", modarg.pid, targetAlloc);
 		}
+		
+		if (modarg.legendMode) printLegend();
 
 		ExitProcess(0);
 	}
@@ -431,6 +538,9 @@ int main(int argc, char** argv)
 		gcs.releaseProcessHandle();
 
 		gcy.finalize();
+
+		if (modarg.legendMode) printLegend();
+
 		ExitProcess(0);
 	}
 
@@ -519,7 +629,7 @@ int main(int argc, char** argv)
 				dfBW += bw;
 
 				// Get the attributes into a string and write them to the map file
-				snprintf(mapString, 80, "%p,0x%X,0x%X,0x%X,0x%X\n", mi->BaseAddress, mi->RegionSize, mi->Protect, mi->Type, (dfBW - mi->RegionSize));
+				snprintf(mapString, 80, "%p,0x%zX,0x%X,0x%X,0x%zX\n", mi->BaseAddress, mi->RegionSize, mi->Protect, mi->Type, (dfBW - mi->RegionSize));
 				bw = 0;
 				WriteFile(mfHandle, mapString, (DWORD)strlen(mapString), &bw, 0);
 
@@ -551,6 +661,9 @@ int main(int argc, char** argv)
 			printf("[!] Error: Could not dump process, likely due to invalid process handle, insufficient heap space, or inability to open a file for writing; exiting!\n");
 			ExitProcess(1);
 		}
+
+		if (modarg.legendMode) printLegend();
+
 		else ExitProcess(0);
 	}
 

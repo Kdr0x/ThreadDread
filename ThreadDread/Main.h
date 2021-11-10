@@ -19,10 +19,9 @@ struct MODESARGS
 	char* pidstr;
 	char* reportServerAddress;
 	char* reportServerPort;
-	char* dumpAddress;
+	char* dumpAddress;			// Kill
 	char* queryAddress;
 	char* zeroAddress;
-	char* regionSize;
 	char* yaraSource;
 
 	// Mode switches
