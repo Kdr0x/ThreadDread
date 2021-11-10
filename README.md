@@ -1,6 +1,6 @@
 # ThreadDread
 
-Author: Gary "kd" Contreras
+Author(s): Gary "kd" Contreras
 
 Latest: 2021-11-10
 
