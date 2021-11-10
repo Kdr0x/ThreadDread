@@ -2,9 +2,9 @@
 
 Author: Gary "kd" Contreras
 
-Latest: 2021-10-21
+Latest: 2021-11-10
 
-Version: Beta 1.2
+Version: Beta 1.4
 
 :::::Usage:::::
 
@@ -25,8 +25,3 @@ ThreadDread is a program I designed to be able to do memory analysis and deep pr
 9. Send scanner output to a remote listening server; used for hunting purposes (tested with a persistent Netcat listener)
 
 All of this functionality is currently featured in version 1.0. If the analyst suspects process injection, ThreadDread should be able to find it using the 3 different scanners available. If they can identify a malicious thread, the tool allows the analyst to suspend, resume, or kill it from the command line without affecting the rest of the, otherwise benign, running process. This functionality was meant to allow the analyst to remove a malicious presence from a legitimate running service without necessarily rebooting the machine.
-
-:::::Future Plans/Features:::::
-
-1. Ingesting Yara rules from the remote server
-2. APC stealth injection detection (Gargoyle stager)
