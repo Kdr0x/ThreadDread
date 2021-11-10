@@ -10,6 +10,8 @@ Version: Beta 1.4
 
 View usage information by specifying the "-h" option on the command line, like so: "ThreadDread.exe -h".
 
+Important note: The tool requires admin rights to run properly! It is meant to inspect all running processes on the system, including elevated ones.
+
 :::::Description:::::
 
 ThreadDread is a program I designed to be able to do memory analysis and deep process injection analysis workflows on a running system. It can be used as both a live response and hunting tool. As a live response tool, the incident responder may wish to perform the following actions:
